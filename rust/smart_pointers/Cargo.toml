@@ -1,0 +1,13 @@
+[package]
+name = "smart_pointers"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+Box = { path = "src/Box" }
+Drop = { path = "src/Drop" }
+Rc = { path = "src/Rc" }
+RefCell = { path = "src/RefCell" }
+ref_cycle = { path = "src/ref_cycle" }
