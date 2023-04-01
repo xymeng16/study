@@ -1,95 +1,73 @@
-// idea and some code borrowed from chaos-mesh
-
 package main
 
 import (
 	"fmt"
-	"github.com/go-logr/logr"
-	"github.com/pkg/errors"
-	"hack-time/mapreader"
-	"hack-time/ptrace"
+	"hack-time/log"
 	"os"
-	"runtime"
+	"strconv"
 )
 
-// try to extract the address of __vdso_clock_gettime in vDSO
-// and replace it with the customized one
-
-/*
- * the signature of __vdso_clock_gettime is:
- * int __vdso_clock_gettime(clockid_t clock, struct timespec *ts);
- * retrieves the time of the specific clock `clockid`, saving in
- * `ts`, defined as
- * 		struct timespec {
- * 			time_t   tv_sec;
- * 			long     tv_nsec;
- * 		};
- *
- */
-
-// Params
-// in linux, time_t is defined as long and clockid_t is defined as int
-// in typical x64 machine sizeof(long) is 8, hence int64 is used
-type Params struct {
-	clockid         int
-	diffSeconds     int64
-	diffNanoSeconds int64
-}
-
-const CLOCK_REALTIME = 0
-const CLOCK_MONOTIME = 1
-
-func hackTime(pid int, params Params, logger logr.Logger) (err error) {
-	runtime.LockOSThread()
-	defer func() {
-		runtime.UnlockOSThread()
-	}()
-
-	trace, err := ptrace.Trace(pid, logger)
-	if err != nil {
-		return errors.Wrapf(err, "failed to attach to #%d\n", pid)
-	}
-	defer func() {
-		err = trace.Detach()
-		if err != nil {
-			logger.Error(err, "failed to detach from #%d\n", pid)
-		}
-	}()
-
-	// find the corresponding vDSO area in the process
-	var vDSOEntry *mapreader.Entry
-	l := len(trace.Entries)
-	for i := range trace.Entries {
-		/* 	vDSO usually resides in entries with higher addresses
-		(validated by `cat /proc/[pid]/maps)
-		*/
-		e := trace.Entries[l-i-1]
-		if e.Path == "[vdso]" {
-			vDSOEntry = &e
-			break
-		}
-	}
-	if vDSOEntry != nil {
-		return errors.Wrapf(err, "cannot find [vdso] entry in $%d", pid)
-	}
-
-	// check if this process has already been hacked, if not, mmap the customized
-	// `clock_gettime` to the process's VM region (with flag MAP_ANONYMOUS)
-
-}
-
 func main() {
-	args := os.Args
-
-	if len(args) != 4 {
-		fmt.Errorf("usage: sudo %s [pid] [diffSeconds] [diffNanoSeconds]")
-		os.Exit(-1)
+	// usage: ./hack-time [pid] [delta_sec] [delta_nsec]
+	// read parameters
+	if len(os.Args) != 4 {
+		fmt.Println("usage: ./hack-time [pid] [delta_sec] [delta_nsec]")
+		return
+	}
+	pid, err := strconv.Atoi(os.Args[1])
+	if err != nil {
+		fmt.Println("error parsing pid:", err)
+		return
+	}
+	deltaSec, err := strconv.ParseInt(os.Args[2], 10, 64)
+	if err != nil {
+		fmt.Println("error parsing delta_sec:", err)
+		return
+	}
+	deltaNSec, err := strconv.ParseInt(os.Args[3], 10, 64)
+	if err != nil {
+		fmt.Println("error parsing delta_nsec:", err)
+		return
 	}
 
-	params := Params{
-		clockid:         CLOCK_REALTIME,
-		diffSeconds:     0,
-		diffNanoSeconds: 0,
+	// get all pids of child processes/threads from /proc/[pid]/task
+	taskDir := "/proc/" + strconv.Itoa(pid) + "/task"
+	taskDirFd, err := os.Open(taskDir)
+	defer taskDirFd.Close()
+	if err != nil {
+		fmt.Println("error opening task dir:", err)
+		return
 	}
 
+	pids, err := taskDirFd.Readdirnames(0)
+	if err != nil {
+		fmt.Println("error reading task dir:", err)
+		return
+	}
+
+	// hack time for each pid
+	logger, err := log.NewDefaultZapLogger()
+	if err != nil {
+		fmt.Println("error creating logger:", err)
+		return
+	}
+
+	s, err := GetSkew(logger, NewConfig(deltaSec, deltaNSec, 1))
+	if err != nil {
+		fmt.Println("error creating skew:", err)
+		return
+	}
+
+	for _, pid := range pids {
+		pidInt, err := strconv.Atoi(pid)
+		if err != nil {
+			fmt.Println("error parsing pid:", err)
+			return
+		}
+		err = s.Inject(pidInt)
+		if err != nil {
+			fmt.Println("error injecting skew for pid #", pid, ":", err)
+			return
+		}
+	}
 }
